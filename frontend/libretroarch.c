@@ -14,6 +14,7 @@
  */
 
 #include <boolean.h>
+#include <features/features_cpu.h>
 #include <queues/task_queue.h>
 
 #ifdef HAVE_CONFIG_H
@@ -25,6 +26,7 @@
 #endif
 
 #include "../audio/audio_driver.h"
+#include "../configuration.h"
 #include "../gfx/video_driver.h"
 #include "../input/input_driver.h"
 #include "../runloop.h"
@@ -54,11 +56,38 @@ int libretroarch_init(int argc, char *argv[])
 int libretroarch_iterate(void)
 {
    int ret;
+   retro_time_t start;
+   input_driver_state_t *input_st = input_state_get_ptr();
    if (!libretroarch_inited)
       return -1;
-   ret = runloop_iterate();
+   start = cpu_features_get_time_usec();
+   ret   = runloop_iterate();
    task_queue_check();
-   return ret == -1 ? -1 : 0;
+   if (ret == -1)
+      return -1;
+
+   /* Fast-forward runs extra frames within one host frame: the host
+    * paces, so the runloop's own timer cannot. */
+   if (input_st->flags & INP_FLAG_NONBLOCKING)
+   {
+      settings_t *settings = config_get_ptr();
+      float ratio          = settings->floats.fastforward_ratio;
+      double fps           = video_state_get_ptr()->av_info.timing.fps;
+      retro_time_t budget  = (retro_time_t)(750000.0 / (fps > 0.0 ? fps : 60.0));
+      unsigned max         = ratio >= 1.0f ? (unsigned)ratio : 64;
+      unsigned count       = 1;
+
+      while (     count < max
+               && (input_st->flags & INP_FLAG_NONBLOCKING)
+               && cpu_features_get_time_usec() - start < budget)
+      {
+         if (runloop_iterate() == -1)
+            return -1;
+         task_queue_check();
+         count++;
+      }
+   }
+   return 0;
 }
 
 void libretroarch_deinit(void)
