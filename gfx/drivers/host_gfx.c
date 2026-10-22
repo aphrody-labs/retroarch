@@ -107,6 +107,7 @@ typedef struct
    unsigned pbo[2];
    unsigned pbo_width[2];
    unsigned pbo_height[2];
+   size_t pbo_size[2];
    unsigned pbo_index;
    unsigned width;
    unsigned height;
@@ -148,6 +149,7 @@ typedef struct
    VkBuffer buf[HOST_VK_SYNC];
    VkDeviceMemory mem[HOST_VK_SYNC];
    const uint8_t *map[HOST_VK_SYNC];
+   VkDeviceSize buf_size[HOST_VK_SYNC];
    unsigned buf_width[HOST_VK_SYNC];
    unsigned buf_height[HOST_VK_SYNC];
    VkFormat buf_format[HOST_VK_SYNC];
@@ -465,15 +467,8 @@ static host_gl_t *host_gl_init(const struct retro_hw_render_callback *hwr,
          && gl->buffer_data && gl->map_buffer_range && gl->unmap_buffer
          && (!gles || hwr->context_type != RETRO_HW_CONTEXT_OPENGLES2))
    {
-      unsigned i;
+      /* sized on the first frame that needs them, not at max geometry */
       gl->gen_buffers(2, gl->pbo);
-      for (i = 0; i < 2; i++)
-      {
-         gl->bind_buffer(HOST_GL_PIXEL_PACK_BUFFER, gl->pbo[i]);
-         gl->buffer_data(HOST_GL_PIXEL_PACK_BUFFER,
-               (intptr_t)width * height * 4, NULL, HOST_GL_STREAM_READ);
-      }
-      gl->bind_buffer(HOST_GL_PIXEL_PACK_BUFFER, 0);
    }
 
    RARCH_LOG("[Host] Headless OpenGL%s context, EGL %d.%d, %ux%u%s.\n",
@@ -511,6 +506,13 @@ static bool host_gl_read(host_video_t *host, unsigned width,
       bool stored   = false;
 
       gl->bind_buffer(HOST_GL_PIXEL_PACK_BUFFER, gl->pbo[cur]);
+      if (size > gl->pbo_size[cur])
+      {
+         /* this buffer was read out a frame ago: nothing is in flight */
+         gl->buffer_data(HOST_GL_PIXEL_PACK_BUFFER, (intptr_t)size, NULL,
+               HOST_GL_STREAM_READ);
+         gl->pbo_size[cur] = size;
+      }
       gl->read_pixels(0, 0, width, height, fmt, HOST_GL_UNSIGNED_BYTE,
             NULL);
       gl->pbo_width[cur]  = width;
@@ -685,6 +687,68 @@ static void host_vk_set_signal_semaphore(void *handle, VkSemaphore semaphore)
    ((host_vk_t*)handle)->signal = semaphore;
 }
 
+/* (Re)creates one slot's readback buffer for bytes. The slot is idle: its
+ * fence was waited a frame ago, when it was the one being published. */
+static bool host_vk_buffer(host_vk_t *vk, unsigned i, VkDeviceSize bytes)
+{
+   VkMemoryRequirements reqs;
+   VkMemoryAllocateInfo alloc;
+   VkBufferCreateInfo buf_info;
+   void *map                              = NULL;
+   VkDevice device                        = vk->ctx.context.device;
+   const VkPhysicalDeviceMemoryProperties *mp =
+      &vk->ctx.context.memory_properties;
+
+   if (vk->pending[i])
+   {
+      vkWaitForFences(device, 1, &vk->fence[i], VK_TRUE, UINT64_MAX);
+      vkResetFences(device, 1, &vk->fence[i]);
+      vk->pending[i] = false;
+   }
+   if (vk->map[i])
+      vkUnmapMemory(device, vk->mem[i]);
+   if (vk->buf[i])
+      vkDestroyBuffer(device, vk->buf[i], NULL);
+   if (vk->mem[i])
+      vkFreeMemory(device, vk->mem[i], NULL);
+   vk->map[i]      = NULL;
+   vk->buf[i]      = VK_NULL_HANDLE;
+   vk->mem[i]      = VK_NULL_HANDLE;
+   vk->buf_size[i] = 0;
+
+   memset(&buf_info, 0, sizeof(buf_info));
+   buf_info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+   buf_info.size        = bytes;
+   buf_info.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+   buf_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+   if (vkCreateBuffer(device, &buf_info, NULL, &vk->buf[i]) != VK_SUCCESS)
+      return false;
+   vkGetBufferMemoryRequirements(device, vk->buf[i], &reqs);
+
+   memset(&alloc, 0, sizeof(alloc));
+   alloc.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+   alloc.allocationSize  = reqs.size;
+   /* cached memory is far faster for the CPU to read */
+   alloc.memoryTypeIndex = vulkan_find_memory_type_fallback(mp,
+         reqs.memoryTypeBits,
+         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+         | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+         | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+   vk->coherent = (mp->memoryTypes[alloc.memoryTypeIndex].propertyFlags
+         & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? true : false;
+   if (     vkAllocateMemory(device, &alloc, NULL, &vk->mem[i])
+         != VK_SUCCESS
+         || vkBindBufferMemory(device, vk->buf[i], vk->mem[i], 0)
+         != VK_SUCCESS
+         || vkMapMemory(device, vk->mem[i], 0, VK_WHOLE_SIZE, 0, &map)
+         != VK_SUCCESS)
+      return false;
+   vk->map[i]      = (const uint8_t*)map;
+   vk->buf_size[i] = bytes;
+   return true;
+}
+
 /* A headless device the core renders with; its images are copied into
  * host-visible buffers, one per sync index. */
 static host_vk_t *host_vk_init(unsigned width, unsigned height)
@@ -694,9 +758,7 @@ static host_vk_t *host_vk_init(unsigned width, unsigned height)
    VkCommandPoolCreateInfo pool_info;
    VkCommandBufferAllocateInfo cmd_info;
    VkFenceCreateInfo fence_info;
-   VkBufferCreateInfo buf_info;
    struct retro_hw_render_interface_vulkan *iface;
-   const VkPhysicalDeviceMemoryProperties *mp;
    host_vk_t *vk = (host_vk_t*)calloc(1, sizeof(*vk));
 
    if (!vk)
@@ -706,7 +768,6 @@ static host_vk_t *host_vk_init(unsigned width, unsigned height)
       goto error;
 
    device     = vk->ctx.context.device;
-   mp         = &vk->ctx.context.memory_properties;
    vk->width  = width;
    vk->height = height;
 
@@ -731,45 +792,11 @@ static host_vk_t *host_vk_init(unsigned width, unsigned height)
    memset(&fence_info, 0, sizeof(fence_info));
    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 
-   memset(&buf_info, 0, sizeof(buf_info));
-   buf_info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-   buf_info.size        = (VkDeviceSize)width * height * 4;
-   buf_info.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-   buf_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
    for (i = 0; i < HOST_VK_SYNC; i++)
    {
-      VkMemoryRequirements reqs;
-      VkMemoryAllocateInfo alloc;
-      void *map = NULL;
-
-      if (     vkCreateFence(device, &fence_info, NULL, &vk->fence[i])
-            != VK_SUCCESS
-            || vkCreateBuffer(device, &buf_info, NULL, &vk->buf[i])
+      if (vkCreateFence(device, &fence_info, NULL, &vk->fence[i])
             != VK_SUCCESS)
          goto error;
-      vkGetBufferMemoryRequirements(device, vk->buf[i], &reqs);
-
-      memset(&alloc, 0, sizeof(alloc));
-      alloc.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-      alloc.allocationSize  = reqs.size;
-      /* cached memory is far faster for the CPU to read */
-      alloc.memoryTypeIndex = vulkan_find_memory_type_fallback(mp,
-            reqs.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-            | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-      vk->coherent = (mp->memoryTypes[alloc.memoryTypeIndex].propertyFlags
-            & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? true : false;
-      if (     vkAllocateMemory(device, &alloc, NULL, &vk->mem[i])
-            != VK_SUCCESS
-            || vkBindBufferMemory(device, vk->buf[i], vk->mem[i], 0)
-            != VK_SUCCESS
-            || vkMapMemory(device, vk->mem[i], 0, VK_WHOLE_SIZE, 0, &map)
-            != VK_SUCCESS)
-         goto error;
-      vk->map[i] = (const uint8_t*)map;
    }
 
    iface                         = &vk->iface;
@@ -945,12 +972,10 @@ static bool host_vk_read(host_video_t *host, unsigned width,
    unsigned prev   = cur ^ 1;
    bool stored     = false;
 
-   if (width > vk->width)
-      width = vk->width;
-   if (height > vk->height)
-      height = vk->height;
-
-   if (vk->image && host_vk_format(vk->image->create_info.format, &bgra))
+   if (     vk->image
+         && host_vk_format(vk->image->create_info.format, &bgra)
+         && (     (VkDeviceSize)width * height * 4 <= vk->buf_size[cur]
+               || host_vk_buffer(vk, cur, (VkDeviceSize)width * height * 4)))
       host_vk_copy(vk, cur, width, height);
    /* the core hands these over again for every frame */
    vk->num_wait = 0;
