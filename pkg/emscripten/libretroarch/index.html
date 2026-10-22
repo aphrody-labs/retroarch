@@ -1,10 +1,12 @@
 <!doctype html>
-<!-- ?core=2048 loads 2048_libretro.js; ?bench=300 times that many iterations -->
+<!-- ?core=2048 loads 2048_libretro.js; ?bench=300 times that many iterations;
+     ?video=auto|webgpu|2d|none; ?audio=1 pulls audio through an AudioWorklet;
+     ?content=game.wad fetches ./game.wad and loads it as content -->
 <html>
 <head>
 <meta charset="utf-8">
 <title>libretroarch</title>
-<style>canvas { image-rendering: pixelated; width: 100%; max-width: 960px; }</style>
+<style>canvas { width: 960px; height: 720px; max-width: 100%; object-fit: contain; image-rendering: pixelated; background: #000; }</style>
 </head>
 <body>
 <canvas id="canvas"></canvas>
@@ -15,22 +17,33 @@ import { start } from "./libretroarch.js";
 const params = new URLSearchParams(location.search);
 const core   = params.get("core") || "2048";
 const bench  = Number(params.get("bench") || 0);
+const content = params.get("content");
 const out    = document.getElementById("out");
 const t0     = performance.now();
 const { default: factory } = await import(`./${core}_libretro.js`);
-const ra     = await start(factory, { canvas: document.getElementById("canvas") });
+const ra     = await start(factory, {
+   canvas: document.getElementById("canvas"),
+   video: params.get("video") || "auto",
+   audio: params.get("audio") === "1",
+   files: content ? { [`/content/${content}`]: content } : {},
+   args: content ? [`/content/${content}`] : []
+});
 const t1     = performance.now();
 
 if (bench)
 {
+   for (let i = 0; i < 60; i++)
+      ra.iterate();
    const t2 = performance.now();
    for (let i = 0; i < bench; i++)
       ra.iterate();
    const t3 = performance.now();
    out.textContent = JSON.stringify({
+      video: ra.video,
       startup_ms: +(t1 - t0).toFixed(1),
       iterate_us: +((t3 - t2) * 1000 / bench).toFixed(1),
-      frames: bench
+      frames: bench,
+      audio: ra.audio?.stats()
    });
    document.title = "done";
 }

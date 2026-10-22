@@ -329,9 +329,14 @@ ifeq ($(WASM_SIMD), 1)
 endif
 
 ifeq ($(OPTIMIZE), 1)
-   LDFLAGS += -s EVAL_CTORS=1
    ifeq ($(HAVE_THREADS), 1)
-      LDFLAGS += -s MALLOC=mimalloc
+      # mimalloc has no mallinfo, which libretro-common's mem_stats calls
+      ifeq ($(MIMALLOC), 1)
+         LDFLAGS += -s MALLOC=mimalloc
+      endif
+   else
+      # not compatible with pthreads
+      LDFLAGS += -s EVAL_CTORS=1
    endif
 endif
 
