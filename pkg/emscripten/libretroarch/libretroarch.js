@@ -426,7 +426,7 @@ export async function start(factory, { canvas, args = [], config = {}, module = 
    const ptrs = Module._malloc(4 * (argv.length + 1));
    argv.forEach((arg, i) => Module.HEAPU32[(ptrs >> 2) + i] = Module.stringToNewUTF8(arg));
    Module.HEAPU32[(ptrs >> 2) + argv.length] = 0;
-   if (Module._libretroarch_init(argv.length, ptrs) !== 0)
+   if (await Module._libretroarch_init(argv.length, ptrs) !== 0)
       throw new Error("libretroarch_init failed");
 
    const frame = Module._malloc(32);

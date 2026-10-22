@@ -128,6 +128,17 @@ WASM_EH ?= $(OPTIMIZE)
 # libretroarch_init/iterate itself instead of the emscripten main loop
 HAVE_LIBRETROARCH ?= 0
 
+# WebGPU video driver (gfx/drivers/webgpu_gfx.c) on the canvas, through the
+# emdawnwebgpu port (webgpu.h; checked with emscripten 6.0.13); select it with
+# video_driver = "webgpu". The adapter and device arrive through callbacks,
+# so neither JSPI nor Asyncify is required.
+HAVE_WEBGPU ?= 0
+ifeq ($(HAVE_WEBGPU), 1)
+   WEBGPU_CFLAGS := --use-port=emdawnwebgpu
+   WEBGPU_LIBS   := --use-port=emdawnwebgpu -sDEFAULT_TO_CXX
+   DEFINES += -DHAVE_WEBGPU
+endif
+
 LTO ?= $(OPTIMIZE)
 PTHREAD_POOL_SIZE ?= 4
 EXIT_RUNTIME ?= 1
@@ -293,8 +304,16 @@ endif
 
 ifeq ($(JSPI), 1)
    CFLAGS += -fwasm-exceptions
-   DEFINES += -DEMSCRIPTEN_ASYNCIFY -DEMSCRIPTEN_FULL_ASYNCIFY -DEMSCRIPTEN_JSPI
    LDFLAGS += -s JSPI=1 -fwasm-exceptions
+ifeq ($(HAVE_LIBRETROARCH), 1)
+   # The page calls libretroarch_iterate synchronously, so only the init
+   # export may suspend (it returns a promise); RetroArch's own sleeps
+   # (audio blocking, hidden-window sleep) stay compiled out.
+   DEFINES += -DEMSCRIPTEN_JSPI
+   LDFLAGS += -s JSPI_EXPORTS=libretroarch_init
+else
+   DEFINES += -DEMSCRIPTEN_ASYNCIFY -DEMSCRIPTEN_FULL_ASYNCIFY -DEMSCRIPTEN_JSPI
+endif
 else ifeq ($(MIN_ASYNC), 1)
    DEFINES += -DEMSCRIPTEN_ASYNCIFY -DEMSCRIPTEN_MIN_ASYNCIFY
    LDFLAGS += -s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192 -s ASYNCIFY_IGNORE_INDIRECT=1 -s ASYNCIFY_ADD='$(ASYNCIFY_ADD)' -s ASYNCIFY_REMOVE='$(ASYNCIFY_REMOVE)'
@@ -310,8 +329,8 @@ else ifeq ($(ASYNC), 1)
 endif
 
 ifeq ($(HAVE_LIBRETROARCH), 1)
-   ifneq ($(ASYNC)$(MIN_ASYNC)$(JSPI), 000)
-      $(error ERROR: HAVE_LIBRETROARCH is driven synchronously; leave ASYNC, MIN_ASYNC and JSPI off)
+   ifneq ($(ASYNC)$(MIN_ASYNC), 00)
+      $(error ERROR: HAVE_LIBRETROARCH is driven synchronously; leave ASYNC and MIN_ASYNC off)
    endif
 endif
 
@@ -334,8 +353,8 @@ ifeq ($(OPTIMIZE), 1)
       ifeq ($(MIMALLOC), 1)
          LDFLAGS += -s MALLOC=mimalloc
       endif
-   else
-      # not compatible with pthreads
+   else ifneq ($(JSPI), 1)
+      # not compatible with pthreads or JSPI
       LDFLAGS += -s EVAL_CTORS=1
    endif
 endif
