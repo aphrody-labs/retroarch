@@ -769,6 +769,9 @@ const video_driver_t *video_drivers[] = {
 #ifdef HAVE_XSHM
    &video_xshm,
 #endif
+#ifdef HAVE_WEBGPU
+   &video_webgpu,
+#endif
 #if defined(_WIN32) && !defined(_XBOX) && !defined(__WINRT__)
 #ifdef HAVE_GDI
    &video_gdi,

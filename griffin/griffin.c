@@ -755,6 +755,10 @@ VIDEO DRIVER
 #include "../gfx/drivers/xvideo.c"
 #endif
 
+#ifdef HAVE_WEBGPU
+#include "../gfx/drivers/webgpu_gfx.c"
+#endif
+
 #if defined(HAVE_GCM)
 #include "../gfx/drivers/rsx_gfx.c"
 #elif defined(GEKKO)

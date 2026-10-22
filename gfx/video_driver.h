@@ -2937,6 +2937,7 @@ extern video_driver_t video_dispmanx;
 extern video_driver_t video_sunxi;
 extern video_driver_t video_drm;
 extern video_driver_t video_xshm;
+extern video_driver_t video_webgpu;
 extern video_driver_t video_caca;
 extern video_driver_t video_gdi;
 extern video_driver_t video_vga;

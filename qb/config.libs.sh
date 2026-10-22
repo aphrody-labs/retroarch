@@ -839,6 +839,7 @@ fi
 
 check_enabled X11 XINERAMA Xinerama 'Xinerama is' false
 check_enabled X11 XSHM XShm 'XShm is' false
+check_enabled X11 WEBGPU WebGPU 'X11 is' false
 check_enabled X11 XRANDR Xrandr 'Xrandr is' false
 check_enabled X11 XVIDEO XVideo 'Xvideo is' false
 check_enabled XEXT XVIDEO XVideo 'Xext is' false
@@ -848,6 +849,11 @@ check_val '' XVIDEO -lXv '' xv '' '' false
 check_val '' XINERAMA -lXinerama '' xinerama '' '' false
 check_lib '' XRANDR -lXrandr
 check_header '' XSHM X11/Xlib.h X11/extensions/XShm.h
+
+if [ "$HAVE_WEBGPU" != 'no' ]; then
+   WEBGPU_LIBS="${WEBGPU_LIBS:--lwgpu_native}"
+   check_lib '' WEBGPU "$WEBGPU_LIBS" wgpuCreateInstance "$WEBGPU_CFLAGS"
+fi
 check_val '' XKBCOMMON -lxkbcommon '' xkbcommon 0.3.2 '' false
 check_val '' WAYLAND '-lwayland-egl -lwayland-client' '' wayland-egl 10.1.0 '' false
 check_val '' WAYLAND_CURSOR -lwayland-cursor '' wayland-cursor 1.12 '' false

@@ -1800,6 +1800,12 @@ ifeq ($(HAVE_XSHM), 1)
    OBJ += gfx/drivers/xshm_gfx.o
 endif
 
+ifeq ($(HAVE_WEBGPU), 1)
+   OBJ += gfx/drivers/webgpu_gfx.o
+   DEF_FLAGS += $(WEBGPU_CFLAGS)
+   LIBS += $(WEBGPU_LIBS)
+endif
+
 ifeq ($(HAVE_VULKAN), 1)
    ifneq ($(findstring Win32,$(OS)),)
       OBJ += gfx/drivers_context/w_vk_ctx.o
