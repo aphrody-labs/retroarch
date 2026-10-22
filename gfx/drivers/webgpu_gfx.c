@@ -33,9 +33,11 @@
 #ifdef __EMSCRIPTEN__
 #include "../../frontend/drivers/platform_emscripten.h"
 #else
+#ifdef HAVE_X11
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include "../common/x11_common.h"
+#endif
 #include "../../frontend/frontend_driver.h"
 #ifdef HAVE_WAYLAND
 #include "../common/wayland_common.h"
@@ -513,10 +515,12 @@ static bool webgpu_window(webgpu_t *wg, const video_info_t *video,
    input_driver_video_window(INPUT_WINDOW_PLATFORM, NULL);
    return true;
 #else
+#ifdef HAVE_X11
    static WGPUSurfaceSourceXlibWindow xlib;
    char title[128];
    XEvent event;
    XSetWindowAttributes attributes;
+#endif
 
 #ifdef HAVE_WAYLAND
    {
@@ -531,6 +535,7 @@ static bool webgpu_window(webgpu_t *wg, const video_info_t *video,
    }
 #endif
 
+#ifdef HAVE_X11
    XInitThreads();
    if (!(g_x11_dpy = XOpenDisplay(NULL)))
    {
@@ -584,6 +589,10 @@ static bool webgpu_window(webgpu_t *wg, const video_info_t *video,
    xlib.window       = (uint64_t)g_x11_win;
    desc->nextInChain = &xlib.chain;
    return true;
+#else
+   RARCH_ERR("[WebGPU] No window system.\n");
+   return false;
+#endif
 #endif
 }
 
@@ -789,9 +798,13 @@ static bool webgpu_frame(void *data, const void *frame,
       if (wg->wl)
          gfx_ctx_wl_check_window_common(wg->wl,
                gfx_ctx_wl_get_video_size_common, &quit, &resize, &window);
+#ifdef HAVE_X11
       else
 #endif
+#endif
+#ifdef HAVE_X11
       x11_check_window(wg, &quit, &resize, &window);
+#endif
       if (quit)
          return false;
    }
@@ -889,9 +902,13 @@ static bool webgpu_frame(void *data, const void *frame,
 #ifdef HAVE_WAYLAND
    if (wg->wl)
       gfx_ctx_wl_update_title_common(wg->wl);
+#ifdef HAVE_X11
    else
 #endif
+#endif
+#ifdef HAVE_X11
    x11_update_title(NULL);
+#endif
 #endif
    return true;
 }
@@ -926,9 +943,13 @@ static bool webgpu_alive(void *data)
    webgpu_t *wg = (webgpu_t*)data;
    /* The compositor's events are pumped by the frame's window check */
    if (wg && wg->wl)
-      return true;
+      return !frontend_driver_get_signal_handler_state();
 #endif
+#ifdef HAVE_X11
    return x11_alive(data);
+#else
+   return true;
+#endif
 }
 
 static bool webgpu_focus(void *data)
@@ -938,7 +959,11 @@ static bool webgpu_focus(void *data)
    if (wg && wg->wl)
       return gfx_ctx_wl_has_focus(wg->wl);
 #endif
+#ifdef HAVE_X11
    return x11_has_focus_internal(data);
+#else
+   return false;
+#endif
 }
 
 static bool webgpu_suppress_screensaver(void *data, bool enable)
@@ -948,7 +973,11 @@ static bool webgpu_suppress_screensaver(void *data, bool enable)
    if (wg && wg->wl)
       return gfx_ctx_wl_suppress_screensaver(wg->wl, enable);
 #endif
+#ifdef HAVE_X11
    return x11_suspend_screensaver(data, enable);
+#else
+   return false;
+#endif
 }
 #endif
 
@@ -1031,6 +1060,7 @@ static void webgpu_free(void *data)
       wg->wl = NULL;
    }
 #endif
+#ifdef HAVE_X11
    if (g_x11_dpy)
    {
       x11_input_ctx_destroy();
@@ -1038,6 +1068,7 @@ static void webgpu_free(void *data)
       XCloseDisplay(g_x11_dpy);
       g_x11_dpy = NULL;
    }
+#endif
 #endif
    free(wg->convert);
    free(wg->menu_frame);
@@ -1129,7 +1160,9 @@ static void webgpu_show_mouse(void *data, bool state)
       return;
    }
 #endif
+#ifdef HAVE_X11
    x11_show_mouse(data, state);
+#endif
 #endif
 }
 

@@ -839,7 +839,6 @@ fi
 
 check_enabled X11 XINERAMA Xinerama 'Xinerama is' false
 check_enabled X11 XSHM XShm 'XShm is' false
-check_enabled X11 WEBGPU WebGPU 'X11 is' false
 check_enabled X11 XRANDR Xrandr 'Xrandr is' false
 check_enabled X11 XVIDEO XVideo 'Xvideo is' false
 check_enabled XEXT XVIDEO XVideo 'Xext is' false
@@ -850,10 +849,6 @@ check_val '' XINERAMA -lXinerama '' xinerama '' '' false
 check_lib '' XRANDR -lXrandr
 check_header '' XSHM X11/Xlib.h X11/extensions/XShm.h
 
-if [ "$HAVE_WEBGPU" != 'no' ]; then
-   WEBGPU_LIBS="${WEBGPU_LIBS:--lwgpu_native}"
-   check_lib '' WEBGPU "$WEBGPU_LIBS" wgpuCreateInstance "$WEBGPU_CFLAGS"
-fi
 check_val '' XKBCOMMON -lxkbcommon '' xkbcommon 0.3.2 '' false
 check_val '' WAYLAND '-lwayland-egl -lwayland-client' '' wayland-egl 10.1.0 '' false
 check_val '' WAYLAND_CURSOR -lwayland-cursor '' wayland-cursor 1.12 '' false
@@ -899,6 +894,12 @@ else
        die 1 'Error: Forced to build with wayland, but its libraries or wayland-scanner were not found. Exiting ...'
     die : 'Notice: wayland libraries not found, disabling wayland support.'
     HAVE_WAYLAND='no'
+fi
+
+check_enabled 'X11 WAYLAND' WEBGPU WebGPU 'X11 or Wayland is' false
+if [ "$HAVE_WEBGPU" != 'no' ]; then
+   WEBGPU_LIBS="${WEBGPU_LIBS:--lwgpu_native}"
+   check_lib '' WEBGPU "$WEBGPU_LIBS" wgpuCreateInstance "$WEBGPU_CFLAGS"
 fi
 
 check_header '' PARPORT linux/parport.h
