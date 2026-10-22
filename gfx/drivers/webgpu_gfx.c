@@ -33,6 +33,11 @@
 #ifdef __EMSCRIPTEN__
 #include "../../frontend/drivers/platform_emscripten.h"
 #else
+#ifdef _WIN32
+#include "../common/win32_common.h"
+#include "../../input/input_driver.h"
+#endif
+
 #ifdef HAVE_X11
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -514,6 +519,53 @@ static bool webgpu_window(webgpu_t *wg, const video_info_t *video,
    *dims               = platform_emscripten_get_canvas_dims();
    input_driver_video_window(INPUT_WINDOW_PLATFORM, NULL);
    return true;
+#elif defined(_WIN32)
+   static WGPUSurfaceSourceWindowsHWND win32;
+   WNDCLASSEX wndclass = {0};
+   unsigned win_dims;
+   HWND hwnd;
+
+   win32_window_reset();
+   win32_monitor_init();
+   /* The same window procedure as the other Windows video drivers */
+   wndclass.lpfnWndProc = win32_window_proc;
+   win32_window_proc_setup(WIN32_WINDOW_D3D);
+   if (!win32_window_init(&wndclass, true, NULL))
+      return false;
+
+   win_dims = video->dims;
+   /* Fullscreen at the desktop's size is asked for as 0x0 */
+   if (video->fullscreen
+         && (!VIDEO_SCALE_W(win_dims) || !VIDEO_SCALE_H(win_dims)))
+   {
+      MONITORINFOEX mon;
+      HMONITOR hm = NULL;
+      unsigned mon_id = 0;
+
+      win32_monitor_info(&mon, &hm, &mon_id);
+      win_dims = VIDEO_SCALE_PACK(
+            mon.rcMonitor.right - mon.rcMonitor.left,
+            mon.rcMonitor.bottom - mon.rcMonitor.top);
+   }
+   if (!win32_set_video_mode(NULL, win_dims, video->fullscreen))
+   {
+      win32_destroy_window();
+      return false;
+   }
+   if (!(hwnd = win32_get_window()))
+      return false;
+
+   *dims = VIDEO_SCALE_PACK(g_win32_resize_width, g_win32_resize_height);
+   if (!VIDEO_SCALE_W(*dims) || !VIDEO_SCALE_H(*dims))
+      *dims = win_dims;
+   input_driver_video_window(INPUT_WINDOW_WINDOWS, NULL);
+
+   memset(&win32, 0, sizeof(win32));
+   win32.chain.sType = WGPUSType_SurfaceSourceWindowsHWND;
+   win32.hinstance   = GetModuleHandle(NULL);
+   win32.hwnd        = hwnd;
+   desc->nextInChain = &win32.chain;
+   return true;
 #else
 #ifdef HAVE_X11
    static WGPUSurfaceSourceXlibWindow xlib;
@@ -790,6 +842,14 @@ static bool webgpu_frame(void *data, const void *frame,
    window = wg->surface_dims;
 #ifdef __EMSCRIPTEN__
    window = platform_emscripten_get_canvas_dims();
+#elif defined(_WIN32)
+   {
+      bool quit   = false;
+      bool resize = false;
+      win32_check_window(NULL, &quit, &resize, &window);
+      if (quit)
+         return false;
+   }
 #else
    {
       bool quit   = false;
@@ -936,7 +996,17 @@ static bool webgpu_suppress_screensaver(void *data, bool enable)
 }
 #endif
 
-#ifndef __EMSCRIPTEN__
+#ifdef _WIN32
+static bool webgpu_alive(void *data)
+{
+   return !(g_win32_flags & WIN32_CMN_FLAG_QUIT);
+}
+static bool webgpu_focus(void *data) { return win32_has_focus(data); }
+static bool webgpu_suppress_screensaver(void *data, bool enable)
+{
+   return win32_suspend_screensaver(data, enable);
+}
+#elif !defined(__EMSCRIPTEN__)
 static bool webgpu_alive(void *data)
 {
 #ifdef HAVE_WAYLAND
@@ -1052,7 +1122,14 @@ static void webgpu_free(void *data)
       wgpuAdapterRelease(wg->adapter);
    if (wg->instance)
       wgpuInstanceRelease(wg->instance);
-#ifndef __EMSCRIPTEN__
+#ifdef _WIN32
+   if (win32_get_window() && !win32_window_keep())
+   {
+      win32_monitor_from_window();
+      win32_destroy_window();
+   }
+   g_win32_flags &= ~WIN32_CMN_FLAG_INITED;
+#elif !defined(__EMSCRIPTEN__)
 #ifdef HAVE_WAYLAND
    if (wg->wl)
    {
@@ -1151,6 +1228,8 @@ static void webgpu_show_mouse(void *data, bool state)
 {
 #ifdef __EMSCRIPTEN__
    platform_emscripten_set_pointer_visibility(state);
+#elif defined(_WIN32)
+   win32_show_cursor(data, state);
 #else
 #ifdef HAVE_WAYLAND
    webgpu_t *wg = (webgpu_t*)data;

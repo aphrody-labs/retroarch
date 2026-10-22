@@ -896,7 +896,8 @@ else
     HAVE_WAYLAND='no'
 fi
 
-check_enabled 'X11 WAYLAND' WEBGPU WebGPU 'X11 or Wayland is' false
+if [ "$OS" = 'Win32' ]; then HAVE_WEBGPU_WIN32=yes; else HAVE_WEBGPU_WIN32=no; fi
+check_enabled 'X11 WAYLAND WEBGPU_WIN32' WEBGPU WebGPU 'X11 or Wayland is' false
 if [ "$HAVE_WEBGPU" != 'no' ]; then
    WEBGPU_LIBS="${WEBGPU_LIBS:--lwgpu_native}"
    check_lib '' WEBGPU "$WEBGPU_LIBS" wgpuCreateInstance "$WEBGPU_CFLAGS"
