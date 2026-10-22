@@ -972,12 +972,24 @@ static void platform_emscripten_mount_filesystems(void)
 }
 #endif /* HAVE_EXTRA_WASMFS */
 
+#ifdef HAVE_LIBRETROARCH
+static void library_mainloop(void)
+{
+}
+#endif
+
 static int thread_main(int argc, char *argv[])
 {
 #ifdef HAVE_EXTRA_WASMFS
    platform_emscripten_mount_filesystems();
 #endif
 
+#ifdef HAVE_LIBRETROARCH
+   /* the page calls libretroarch_init and iterate; the paused loop
+    * keeps the timing calls valid */
+   emscripten_set_main_loop(library_mainloop, 0, 0);
+   emscripten_pause_main_loop();
+#else
    PlatformEmscriptenGLContextEventInit();
    emscripten_set_main_loop(emscripten_mainloop, 0, 0);
    emscripten_pause_main_loop();
@@ -988,6 +1000,7 @@ static int thread_main(int argc, char *argv[])
 #endif
    rarch_main(argc, argv, NULL);
    emscripten_resume_main_loop();
+#endif
 
    return 0;
 }
@@ -1042,6 +1055,7 @@ int main(int argc, char *argv[])
       return Atomics?.waitAsync?.toString().includes("[native code]");
    });
 
+#ifndef HAVE_LIBRETROARCH
    EM_ASM({
       /* keyboard events won't work without the canvas being focused */
       if (!Module.canvas.getAttribute("tabindex"))
@@ -1070,10 +1084,13 @@ int main(int argc, char *argv[])
          Module.canvas.style.height = oldHeight + "px";
       }
    });
+#endif
 
    PlatformEmscriptenKeepThreadAlive();
+#ifndef HAVE_LIBRETROARCH
    PlatformEmscriptenWatchCanvasSizeAndDpr(&emscripten_platform_data->device_pixel_ratio_temp);
    PlatformEmscriptenCanvasListenersInit();
+#endif
    PlatformEmscriptenWatchWindowVisibility();
    PlatformEmscriptenPowerStateInit();
    PlatformEmscriptenMemoryUsageInit();

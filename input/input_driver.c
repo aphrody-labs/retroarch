@@ -11128,16 +11128,16 @@ void input_driver_init_command(input_driver_state_t *input_st,
       RARCH_ERR("Failed to initialize the UDS command interface.\n");
       started = false;
    }
-#elif defined(__EMSCRIPTEN__)
-   if (!(input_st->command[2] = command_emscripten_new()))
-   {
-      RARCH_ERR("Failed to initialize the emscripten command interface.\n");
-      started = false;
-   }
 #elif defined(HAVE_LIBRETROARCH)
    if (!(input_st->command[2] = command_host_new()))
    {
       RARCH_ERR("Failed to initialize the host command interface.\n");
+      started = false;
+   }
+#elif defined(__EMSCRIPTEN__)
+   if (!(input_st->command[2] = command_emscripten_new()))
+   {
+      RARCH_ERR("Failed to initialize the emscripten command interface.\n");
       started = false;
    }
 #endif

@@ -252,3 +252,23 @@ When testing emscripten-specific changes, please use `ASSERTIONS=1` to provide b
 - Microphone driver (rwebaudio/audioworklet)
 - Crash handling
 - Async command interface?
+
+## Optimized and library builds
+
+`OPTIMIZE=1` turns on LTO over bitcode objects, wasm SIMD (`-msimd128`), native wasm exceptions
+and longjmp (`-fwasm-exceptions -sSUPPORT_LONGJMP=wasm`), `EVAL_CTORS`, and mimalloc with threads.
+Build the core with the same flags, for example
+`emmake make -f Makefile.libretro platform=emscripten CC="emcc -flto -msimd128 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm"`.
+It cannot be combined with `ASYNC` or `MIN_ASYNC`.
+
+`HAVE_LIBRETROARCH=1` builds RetroArch as a library (`frontend/libretroarch.h`): the page calls
+`libretroarch_init` and one `libretroarch_iterate` per frame itself, and RetroArch's `host` drivers
+hand frames, audio and pads over through the heap. `pkg/emscripten/libretroarch` is a minimal page
+that does this:
+
+```
+emmake make -f Makefile.emscripten LIBRETRO=fceumm OPTIMIZE=1 HAVE_LIBRETROARCH=1 -j all
+cp fceumm_libretro.* pkg/emscripten/libretroarch
+```
+
+Then open `index.html?core=fceumm`.

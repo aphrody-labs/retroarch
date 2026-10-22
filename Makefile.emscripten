@@ -118,8 +118,19 @@ HAVE_OPENGLES3 ?= 0
 # does nothing on its own, but automatically selected by some other options
 WASM_WORKERS = 0
 
-LTO ?= 0
+# optimized profile: real LTO, wasm SIMD, native wasm exceptions and longjmp
+# (the core must be built with the same -fwasm-exceptions -sSUPPORT_LONGJMP=wasm)
+OPTIMIZE ?= 0
+WASM_SIMD ?= $(OPTIMIZE)
+WASM_EH ?= $(OPTIMIZE)
+
+# RetroArch as a library (frontend/libretroarch.h): the page calls
+# libretroarch_init/iterate itself instead of the emscripten main loop
+HAVE_LIBRETROARCH ?= 0
+
+LTO ?= $(OPTIMIZE)
 PTHREAD_POOL_SIZE ?= 4
+EXIT_RUNTIME ?= 1
 
 ASYNCIFY_ADD ?= dynCall_*,emscripten_mainloop
 ASYNCIFY_REMOVE ?= threaded_worker
@@ -147,6 +158,16 @@ _cmd_set_volume,_cmd_set_shader,_cmd_cheat_set_code,_cmd_cheat_get_code,_cmd_che
 _cmd_cheat_get_size,_cmd_cheat_apply_cheats,EmscriptenSendCommand,EmscriptenReceiveCommandReply
 
 EXPORTS := callMain,FS,PATH,ERRNO_CODES,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply
+
+ifeq ($(HAVE_LIBRETROARCH), 1)
+   EXPORTED_FUNCTIONS := $(EXPORTED_FUNCTIONS),_libretroarch_api_version,_libretroarch_init,_libretroarch_iterate,\
+_libretroarch_deinit,_libretroarch_status,_libretroarch_frame,_libretroarch_audio_read,_libretroarch_joypad,_libretroarch_command,_libretroarch_command_reply
+   EXPORTS := $(EXPORTS),HEAPU8,HEAPU16,HEAP16,HEAPU32,HEAPF32,HEAPF64
+   override EXIT_RUNTIME = 0
+   ifeq ($(PROXY_TO_PTHREAD), 1)
+      $(error ERROR: HAVE_LIBRETROARCH runs on the page's thread, not PROXY_TO_PTHREAD)
+   endif
+endif
 
 LIBS   := -s USE_ZLIB=1
 CFLAGS := -s USE_ZLIB=1
@@ -186,7 +207,7 @@ ifeq ($(HAVE_SDL2), 1)
 endif
 
 LDFLAGS := -L. --no-heap-copy -s STACK_SIZE=$(STACK_SIZE) -s INITIAL_MEMORY=$(INITIAL_HEAP) \
-           -s EXPORTED_RUNTIME_METHODS=$(EXPORTS) -s EXIT_RUNTIME=1 \
+           -s EXPORTED_RUNTIME_METHODS=$(EXPORTS) -s EXIT_RUNTIME=$(EXIT_RUNTIME) \
            -s ALLOW_MEMORY_GROWTH=1 -s EXPORTED_FUNCTIONS="$(EXPORTED_FUNCTIONS)" \
            -s MODULARIZE=1 -s EXPORT_ES6=1 -s EXPORT_NAME="libretro_$(subst -,_,$(LIBRETRO))" \
            -s DISABLE_DEPRECATED_FIND_EVENT_TARGET_BEHAVIOR=0 \
@@ -288,6 +309,32 @@ else ifeq ($(ASYNC), 1)
    endif
 endif
 
+ifeq ($(HAVE_LIBRETROARCH), 1)
+   ifneq ($(ASYNC)$(MIN_ASYNC)$(JSPI), 000)
+      $(error ERROR: HAVE_LIBRETROARCH is driven synchronously; leave ASYNC, MIN_ASYNC and JSPI off)
+   endif
+endif
+
+ifeq ($(WASM_EH), 1)
+   ifneq ($(ASYNC)$(MIN_ASYNC), 00)
+      $(error ERROR: WASM_EH is incompatible with ASYNC and MIN_ASYNC (use JSPI))
+   endif
+   CFLAGS += -fwasm-exceptions -sSUPPORT_LONGJMP=wasm
+   LDFLAGS += -fwasm-exceptions -sSUPPORT_LONGJMP=wasm
+endif
+
+ifeq ($(WASM_SIMD), 1)
+   CFLAGS += -msimd128
+   LDFLAGS += -msimd128
+endif
+
+ifeq ($(OPTIMIZE), 1)
+   LDFLAGS += -s EVAL_CTORS=1
+   ifeq ($(HAVE_THREADS), 1)
+      LDFLAGS += -s MALLOC=mimalloc
+   endif
+endif
+
 ifeq ($(CLOSURE_COMPILER), 1)
    LDFLAGS += --closure 1 --closure-args=--externs=emscripten/closure_externs.js --post-js emscripten/closure_post.js
 endif
@@ -328,8 +375,15 @@ else
    # WARNING: some optimizations can break some cores (ex: LTO breaks tyrquake)
    ifeq ($(LTO), 1)
       LDFLAGS += -flto
+      ifeq ($(OPTIMIZE), 1)
+         # bitcode objects, so the link step really optimizes across them
+         CFLAGS += -flto
+      endif
    endif
    CFLAGS += -O3
+   ifeq ($(OPTIMIZE), 1)
+      CXXFLAGS += -O3 $(filter -flto -msimd128 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm,$(CFLAGS))
+   endif
 endif
 
 ifneq ($(ASSERTIONS), 0)
