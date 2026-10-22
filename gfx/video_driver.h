@@ -2944,6 +2944,10 @@ extern video_driver_t video_fpga;
 extern video_driver_t video_sixel;
 extern video_driver_t video_network;
 extern video_driver_t video_host;
+#if defined(HAVE_LIBRETROARCH) && defined(HAVE_EGL)
+/* OpenGL contexts the host driver renders headless */
+bool video_host_hw_context_supported(enum retro_hw_context_type type);
+#endif
 extern video_driver_t video_hub75;
 extern video_driver_t video_oga;
 extern video_driver_t video_null;

@@ -4726,6 +4726,16 @@ bool video_driver_find_driver(
 
       video_st->current_video              = NULL;
 
+#if defined(HAVE_LIBRETROARCH) && defined(HAVE_EGL)
+      /* the host driver renders the core's context itself */
+      if (     string_is_equal(settings->arrays.video_driver, "host")
+            && video_host_hw_context_supported(hwr->context_type))
+      {
+         video_st->current_video = &video_host;
+         return true;
+      }
+#endif
+
       if (hwr)
       {
          switch (rdr_type)
