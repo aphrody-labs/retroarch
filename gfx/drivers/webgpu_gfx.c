@@ -39,6 +39,12 @@
 #include "../../frontend/frontend_driver.h"
 #endif
 
+#ifdef HAVE_WEBGPU_SLANG
+#include <compat/strl.h>
+#include <string/stdstring.h>
+#include "../drivers_shader/shader_webgpu.h"
+#endif
+
 #include "../video_driver.h"
 #include "../../configuration.h"
 #include "../../verbosity.h"
@@ -67,6 +73,11 @@ typedef struct
 
    webgpu_image_t core;
    webgpu_image_t menu;
+#ifdef HAVE_WEBGPU_SLANG
+   webgpu_filter_chain_t *chain;
+   /* a preset set before the device came */
+   char *shader_path;
+#endif
 
    video_viewport_t vp;
 
@@ -356,6 +367,15 @@ static void webgpu_setup(webgpu_t *wg)
       return;
    }
    wg->ready = true;
+#ifdef HAVE_WEBGPU_SLANG
+   if (wg->shader_path)
+   {
+      wg->chain = webgpu_filter_chain_new(wg->instance, wg->device,
+            wg->queue, wg->format, wg->shader_path);
+      free(wg->shader_path);
+      wg->shader_path = NULL;
+   }
+#endif
 }
 
 static void webgpu_on_device(WGPURequestDeviceStatus status,
@@ -715,7 +735,13 @@ static bool webgpu_frame(void *data, const void *frame,
          wg->configured = false;
          return true;
    }
-   target = wgpuTextureCreateView(current.texture, NULL);
+   target  = wgpuTextureCreateView(current.texture, NULL);
+   encoder = wgpuDeviceCreateCommandEncoder(wg->device, NULL);
+#ifdef HAVE_WEBGPU_SLANG
+   if (draw_core && wg->chain)
+      webgpu_filter_chain_record(wg->chain, encoder, wg->core.view,
+            wg->core.dims, wg->smooth, wg->vp.dims, frame_count, 0);
+#endif
 
    memset(&color, 0, sizeof(color));
    color.view       = target;
@@ -727,8 +753,13 @@ static bool webgpu_frame(void *data, const void *frame,
    pass_desc.colorAttachmentCount = 1;
    pass_desc.colorAttachments     = &color;
 
-   encoder = wgpuDeviceCreateCommandEncoder(wg->device, NULL);
    pass    = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
+#ifdef HAVE_WEBGPU_SLANG
+   if (     draw_core && wg->chain
+         && webgpu_viewport(pass, &wg->vp, wg->surface_dims))
+      webgpu_filter_chain_draw(wg->chain, pass);
+   else
+#endif
    if (draw_core && webgpu_viewport(pass, &wg->vp, wg->surface_dims))
    {
       wgpuRenderPassEncoderSetPipeline(pass, wg->core_pipe);
@@ -787,7 +818,35 @@ static bool webgpu_suppress_screensaver(void *data, bool enable)
 static bool webgpu_has_windowed(void *data) { return true; }
 
 static bool webgpu_set_shader(void *data,
-      enum rarch_shader_type type, const char *path) { return false; }
+      enum rarch_shader_type type, const char *path)
+{
+#ifdef HAVE_WEBGPU_SLANG
+   webgpu_t *wg = (webgpu_t*)data;
+   if (!wg)
+      return false;
+   webgpu_filter_chain_free(wg->chain);
+   wg->chain = NULL;
+   free(wg->shader_path);
+   wg->shader_path = NULL;
+   if (string_is_empty(path))
+      return true;
+   if (type != RARCH_SHADER_SLANG)
+   {
+      RARCH_WARN("[WebGPU] Only slang presets run here.\n");
+      return false;
+   }
+   if (!wg->ready)
+   {
+      wg->shader_path = strldup(path, strlen(path));
+      return wg->shader_path != NULL;
+   }
+   wg->chain = webgpu_filter_chain_new(wg->instance, wg->device,
+         wg->queue, wg->format, path);
+   return wg->chain != NULL;
+#else
+   return false;
+#endif
+}
 
 static void webgpu_free(void *data)
 {
@@ -795,6 +854,10 @@ static void webgpu_free(void *data)
    webgpu_t *wg = (webgpu_t*)data;
    if (!wg)
       return;
+#ifdef HAVE_WEBGPU_SLANG
+   webgpu_filter_chain_free(wg->chain);
+   free(wg->shader_path);
+#endif
    webgpu_image_free(&wg->core);
    webgpu_image_free(&wg->menu);
    if (wg->menu_alpha)
@@ -920,7 +983,22 @@ static void webgpu_show_mouse(void *data, bool state)
 
 static void webgpu_grab_mouse_toggle(void *data) { }
 
-static uint32_t webgpu_get_flags(void *data) { return 0; }
+static uint32_t webgpu_get_flags(void *data)
+{
+   uint32_t flags = 0;
+#ifdef HAVE_WEBGPU_SLANG
+   BIT32_SET(flags, GFX_CTX_FLAGS_SHADERS_SLANG);
+#endif
+   return flags;
+}
+
+#ifdef HAVE_WEBGPU_SLANG
+static struct video_shader *webgpu_get_current_shader(void *data)
+{
+   webgpu_t *wg = (webgpu_t*)data;
+   return wg ? webgpu_filter_chain_get_preset(wg->chain) : NULL;
+}
+#endif
 
 static video_poke_interface_t webgpu_poke_interface = {
    webgpu_get_flags,
@@ -941,7 +1019,11 @@ static video_poke_interface_t webgpu_poke_interface = {
    NULL, /* set_osd_msg */
    webgpu_show_mouse,
    webgpu_grab_mouse_toggle,
+#ifdef HAVE_WEBGPU_SLANG
+   webgpu_get_current_shader,
+#else
    NULL, /* get_current_shader */
+#endif
    NULL, /* get_current_software_framebuffer */
    NULL, /* get_hw_render_interface */
    NULL, /* set_hdr_menu_nits */

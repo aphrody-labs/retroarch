@@ -757,6 +757,9 @@ VIDEO DRIVER
 
 #ifdef HAVE_WEBGPU
 #include "../gfx/drivers/webgpu_gfx.c"
+#ifdef HAVE_WEBGPU_SLANG
+#include "../gfx/drivers_shader/shader_webgpu.c"
+#endif
 #endif
 
 #if defined(HAVE_GCM)

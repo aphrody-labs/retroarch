@@ -1804,6 +1804,12 @@ ifeq ($(HAVE_WEBGPU), 1)
    OBJ += gfx/drivers/webgpu_gfx.o
    DEF_FLAGS += $(WEBGPU_CFLAGS)
    LIBS += $(WEBGPU_LIBS)
+   # Slang presets need SPIRV-Tools to split combined image samplers
+   ifeq ($(HAVE_SLANG)$(HAVE_GLSLANG_SPIRV_TOOLS_OPT)$(HAVE_GLSLANG_SPIRV_TOOLS), 111)
+      DEFINES += -DHAVE_WEBGPU_SLANG
+      OBJ += gfx/drivers_shader/shader_webgpu.o
+      LIBS += $(GLSLANG_SPIRV_TOOLS_OPT_LIBS) $(GLSLANG_SPIRV_TOOLS_LIBS)
+   endif
 endif
 
 ifeq ($(HAVE_VULKAN), 1)
