@@ -175,6 +175,10 @@ struct string_list;
 #include <libdecor.h>
 #endif
 
+#ifdef HAVE_DYLIB
+#include <dynamic/dylib.h>
+#endif
+
 typedef struct
 {
    int16_t x;
