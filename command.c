@@ -597,6 +597,99 @@ command_t* command_emscripten_new(void)
 }
 #endif
 
+#ifdef HAVE_LIBRETROARCH
+#include "frontend/libretroarch.h"
+
+#define HOST_COMMAND_REPLY_SIZE (64 * 1024)
+
+/* static: the host may queue before the interface starts */
+static char   host_command_pending[CMD_BUF_SIZE];
+static size_t host_command_pending_len = 0;
+static char   host_command_reply[HOST_COMMAND_REPLY_SIZE];
+static size_t host_command_reply_len   = 0;
+
+typedef struct
+{
+   char command_buf[CMD_BUF_SIZE];
+} command_host_t;
+
+static void host_command_reply_append(command_t *_cmd,
+   const char *s, size_t len)
+{
+   size_t room = HOST_COMMAND_REPLY_SIZE - 1 - host_command_reply_len;
+   if (len > room)
+      len = room;
+   memcpy(host_command_reply + host_command_reply_len, s, len);
+   host_command_reply_len += len;
+}
+
+static void host_command_free(command_t *handle)
+{
+   free(handle->userptr);
+   free(handle);
+}
+
+static void command_host_poll(command_t *handle)
+{
+   command_host_t *hostcmd = (command_host_t*)handle->userptr;
+   if (!host_command_pending_len)
+      return;
+   memcpy(hostcmd->command_buf, host_command_pending,
+         host_command_pending_len);
+   hostcmd->command_buf[host_command_pending_len] = '\0';
+   host_command_pending_len = 0;
+   command_parse_msg(handle, hostcmd->command_buf);
+}
+
+command_t* command_host_new(void)
+{
+   command_t *cmd;
+   command_host_t *hostcmd;
+
+   if (!(cmd = (command_t*)calloc(1, sizeof(command_t))))
+      return NULL;
+
+   if (!(hostcmd = (command_host_t*)calloc(1, sizeof(command_host_t))))
+   {
+      free(cmd);
+      return NULL;
+   }
+
+   cmd->userptr = hostcmd;
+   cmd->poll    = command_host_poll;
+   cmd->replier = host_command_reply_append;
+   cmd->destroy = host_command_free;
+
+   return cmd;
+}
+
+int libretroarch_command(const char *s)
+{
+   size_t len = strlen(s);
+   if (host_command_pending_len + len + 1 >= CMD_BUF_SIZE)
+      return 0;
+   memcpy(host_command_pending + host_command_pending_len, s, len);
+   host_command_pending_len += len;
+   host_command_pending[host_command_pending_len++] = '\n';
+   return 1;
+}
+
+size_t libretroarch_command_reply(char *buf, size_t len)
+{
+   size_t n = host_command_reply_len;
+   if (!len)
+      return 0;
+   if (n > len - 1)
+      n = len - 1;
+   memcpy(buf, host_command_reply, n);
+   buf[n] = '\0';
+   memmove(host_command_reply, host_command_reply + n,
+         host_command_reply_len - n);
+   host_command_reply_len -= n;
+   return n;
+}
+#endif
+
 #if defined(HAVE_LAKKA)
 #include <sys/un.h>
 #define MAX_USER_CONNECTIONS  4

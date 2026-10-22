@@ -218,6 +218,7 @@ HAVE_BLISSBOX=auto         # Blissbox support
 HAVE_LIBSHAKE=no           # libShake haptic feedback support
 HAVE_RPILED=auto           # RPI led support
 HAVE_TEST_DRIVERS=yes      # Test input driver
+HAVE_LIBRETROARCH=no       # Build libretroarch, a shared library a host drives
 
 # SDL (video, audio and input)
 HAVE_SDL=auto              # SDL support

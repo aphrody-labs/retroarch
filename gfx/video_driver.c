@@ -789,6 +789,9 @@ const video_driver_t *video_drivers[] = {
 #ifdef HAVE_NETWORK_VIDEO
    &video_network,
 #endif
+#ifdef HAVE_LIBRETROARCH
+   &video_host,
+#endif
 #ifdef HAVE_HUB75
    &video_hub75,
 #endif

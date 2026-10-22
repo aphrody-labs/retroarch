@@ -27,6 +27,20 @@ else
 TARGET = retroarch
 endif
 
+ifeq ($(HAVE_LIBRETROARCH), 1)
+   ifneq ($(findstring Win32,$(OS)),)
+      TARGET = libretroarch.dll
+   else ifneq ($(findstring Darwin,$(OS)),)
+      TARGET = libretroarch.dylib
+   else
+      TARGET = libretroarch.so
+   endif
+   CFLAGS   += -fPIC
+   CXXFLAGS += -fPIC
+   OBJCFLAGS += -fPIC
+   LDFLAGS  += -shared
+endif
+
 OBJ :=
 LIBS :=
 DEF_FLAGS := -I.

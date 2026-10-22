@@ -10276,6 +10276,11 @@ end:
                : settings->floats.video_refresh_rate);
    }
 
+#ifdef HAVE_LIBRETROARCH
+   /* the host holds the loop: it calls each iteration on its own clock */
+   runloop_st->pace &= ~RUNLOOP_PACE_TIMER;
+#endif
+
    /* The low-latency backend releases the next frame: the hold is the
     * driver's signal, taken here where the frame delay would have
     * slept, before the next iteration samples input. The timer's

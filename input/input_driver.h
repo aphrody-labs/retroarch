@@ -2359,6 +2359,7 @@ extern input_device_driver_t dos_joypad;
 extern input_device_driver_t rwebpad_joypad;
 extern input_device_driver_t winraw_joypad;
 extern input_device_driver_t test_joypad;
+extern input_device_driver_t host_joypad;
 
 #ifdef HAVE_HID
 extern hid_driver_t iohidmanager_hid;

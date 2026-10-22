@@ -235,7 +235,8 @@ check_enabled NETWORKING NETWORKGAMEPAD 'the networked game pad' 'Networking is'
 
 check_lib '' STDIN_CMD "$CLIB" fcntl
 
-if [ "$HAVE_NETWORK_CMD" = "yes" ] || [ "$HAVE_STDIN_CMD" = "yes" ]; then
+if [ "$HAVE_NETWORK_CMD" = "yes" ] || [ "$HAVE_STDIN_CMD" = "yes" ] ||
+   [ "$HAVE_LIBRETROARCH" = "yes" ]; then
    add_opt COMMAND yes
 else
    add_opt COMMAND no

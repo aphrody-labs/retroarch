@@ -822,6 +822,9 @@ input_device_driver_t *joypad_drivers[] = {
 #ifdef HAVE_TEST_DRIVERS
    &test_joypad,
 #endif
+#ifdef HAVE_LIBRETROARCH
+   &host_joypad,
+#endif
    &null_joypad,
    NULL,
 };
@@ -11129,6 +11132,12 @@ void input_driver_init_command(input_driver_state_t *input_st,
    if (!(input_st->command[2] = command_emscripten_new()))
    {
       RARCH_ERR("Failed to initialize the emscripten command interface.\n");
+      started = false;
+   }
+#elif defined(HAVE_LIBRETROARCH)
+   if (!(input_st->command[2] = command_host_new()))
+   {
+      RARCH_ERR("Failed to initialize the host command interface.\n");
       started = false;
    }
 #endif

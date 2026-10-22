@@ -1550,6 +1550,7 @@ extern audio_driver_t audio_switch;
 extern audio_driver_t audio_switch_libnx_audren;
 extern audio_driver_t audio_rwebaudio;
 extern audio_driver_t audio_audioworklet;
+extern audio_driver_t audio_host;
 
 audio_driver_state_t *audio_state_get_ptr(void);
 

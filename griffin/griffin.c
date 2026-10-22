@@ -968,6 +968,13 @@ INPUT
 #include "../input/drivers/test_input.c"
 #endif
 
+#ifdef HAVE_LIBRETROARCH
+#include "../frontend/libretroarch.c"
+#include "../gfx/drivers/host_gfx.c"
+#include "../audio/drivers/host_audio.c"
+#include "../input/drivers_joypad/host_joypad.c"
+#endif
+
 /*============================================================
 INPUT (HID)
 ============================================================ */

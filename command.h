@@ -435,6 +435,9 @@ command_t* command_uds_new(void);
 #ifdef __EMSCRIPTEN__
 command_t* command_emscripten_new(void);
 #endif
+#ifdef HAVE_LIBRETROARCH
+command_t* command_host_new(void);
+#endif
 
 
 void command_event_set_mixer_volume(

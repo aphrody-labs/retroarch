@@ -366,6 +366,9 @@ audio_driver_t *audio_drivers[] = {
    &audio_switch,
    &audio_switch_libnx_audren,
 #endif
+#ifdef HAVE_LIBRETROARCH
+   &audio_host,
+#endif
    &audio_null,
    NULL,
 };
