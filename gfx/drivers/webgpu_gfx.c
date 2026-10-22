@@ -37,6 +37,12 @@
 #include <X11/Xutil.h>
 #include "../common/x11_common.h"
 #include "../../frontend/frontend_driver.h"
+#ifdef HAVE_WAYLAND
+#include "../common/wayland_common.h"
+#include "../common/wayland_resize.h"
+#include "../../input/common/wayland_common.h"
+#include "../../input/input_driver.h"
+#endif
 #endif
 
 #ifdef HAVE_WEBGPU_SLANG
@@ -80,6 +86,11 @@ typedef struct
 #endif
 
    video_viewport_t vp;
+
+#ifdef HAVE_WAYLAND
+   /* The Wayland window, NULL while the X11 one is used */
+   gfx_ctx_wayland_data_t *wl;
+#endif
 
    /* RGB565 frames as XRGB8888, menu textures as RGBA8 */
    uint32_t *convert;
@@ -276,6 +287,15 @@ static void webgpu_configure(webgpu_t *wg, unsigned dims)
    wgpuSurfaceConfigure(wg->surface, &cfg);
    wg->surface_dims       = dims;
    wg->configured         = true;
+#ifdef HAVE_WAYLAND
+   if (wg->wl)
+   {
+      wg->wl->last_buffer_scale         = wg->wl->buffer_scale;
+      wg->wl->last_fractional_scale_num = wg->wl->fractional_scale_num;
+      wl_surface_resized(wg->wl->surface, wg->wl->fractional_scale != NULL,
+            wg->wl->buffer_scale, &wg->wl->ignore_configuration);
+   }
+#endif
    wg->vp.full_dims       = dims;
    video_driver_set_output_dims(dims);
 }
@@ -420,6 +440,66 @@ static void webgpu_on_adapter(WGPURequestAdapterStatus status,
 
 static void webgpu_free(void *data);
 
+#if defined(HAVE_WAYLAND) && !defined(__EMSCRIPTEN__)
+static bool webgpu_window_wayland(webgpu_t *wg, const video_info_t *video,
+      WGPUSurfaceDescriptor *desc, unsigned *dims)
+{
+   static WGPUSurfaceSourceWaylandSurface wayland;
+   gfx_ctx_wayland_data_t *wl = NULL;
+   unsigned width;
+   unsigned height;
+
+   if (!gfx_ctx_wl_init_common(NULL, &wl))
+   {
+      RARCH_ERR("[WebGPU] Cannot connect to the Wayland compositor.\n");
+      if (wl)
+         gfx_ctx_wl_free_common(wl, false);
+      return false;
+   }
+   wg->wl = wl;
+   wl->max_swapchain_images = config_get_ptr()->uints.video_max_swapchain_images;
+
+   /* Fullscreen at the desktop's size is asked for as 0x0 */
+   *dims  = video->dims;
+   width  = VIDEO_SCALE_W(*dims);
+   height = VIDEO_SCALE_H(*dims);
+   if (!gfx_ctx_wl_set_video_mode_common_size(wl, width, height,
+            video->fullscreen))
+      goto error;
+
+   if (!wl->fractional_scale &&
+       wl_compositor_get_version(wl->compositor) >=
+       WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION)
+      wl_surface_set_buffer_scale(wl->surface, wl->buffer_scale);
+
+   if (!gfx_ctx_wl_set_video_mode_common_fullscreen(wl, video->fullscreen))
+      goto error;
+
+   /* The buffer is sized in pixels, which the scale and a fullscreen
+    * configure may have changed from what was asked for */
+   if (video->fullscreen)
+      gfx_ctx_wl_get_video_size_common(wl, dims);
+   if (!video->fullscreen || !VIDEO_SCALE_W(*dims) || !VIDEO_SCALE_H(*dims))
+      *dims = wl->buffer_dims;
+
+   wl->input.gfx = wl;
+   input_driver_video_window(INPUT_WINDOW_WAYLAND, &wl->input);
+   frontend_driver_install_signal_handler();
+
+   memset(&wayland, 0, sizeof(wayland));
+   wayland.chain.sType = WGPUSType_SurfaceSourceWaylandSurface;
+   wayland.display     = wl->input.dpy;
+   wayland.surface     = wl->surface;
+   desc->nextInChain   = &wayland.chain;
+   return true;
+
+error:
+   gfx_ctx_wl_free_common(wl, false);
+   wg->wl = NULL;
+   return false;
+}
+#endif
+
 static bool webgpu_window(webgpu_t *wg, const video_info_t *video,
       WGPUSurfaceDescriptor *desc, unsigned *dims)
 {
@@ -437,6 +517,19 @@ static bool webgpu_window(webgpu_t *wg, const video_info_t *video,
    char title[128];
    XEvent event;
    XSetWindowAttributes attributes;
+
+#ifdef HAVE_WAYLAND
+   {
+      /* A Wayland session is served natively, whatever X it also has */
+      const char *wl_display_name = getenv("WAYLAND_DISPLAY");
+      if (wl_display_name && *wl_display_name)
+      {
+         if (webgpu_window_wayland(wg, video, desc, dims))
+            return true;
+         RARCH_WARN("[WebGPU] No Wayland window, trying X11.\n");
+      }
+   }
+#endif
 
    XInitThreads();
    if (!(g_x11_dpy = XOpenDisplay(NULL)))
@@ -692,6 +785,12 @@ static bool webgpu_frame(void *data, const void *frame,
    {
       bool quit   = false;
       bool resize = false;
+#ifdef HAVE_WAYLAND
+      if (wg->wl)
+         gfx_ctx_wl_check_window_common(wg->wl,
+               gfx_ctx_wl_get_video_size_common, &quit, &resize, &window);
+      else
+#endif
       x11_check_window(wg, &quit, &resize, &window);
       if (quit)
          return false;
@@ -787,6 +886,11 @@ static bool webgpu_frame(void *data, const void *frame,
    wgpuTextureRelease(current.texture);
 
 #ifndef __EMSCRIPTEN__
+#ifdef HAVE_WAYLAND
+   if (wg->wl)
+      gfx_ctx_wl_update_title_common(wg->wl);
+   else
+#endif
    x11_update_title(NULL);
 #endif
    return true;
@@ -812,6 +916,39 @@ static bool webgpu_suppress_screensaver(void *data, bool enable)
 {
    platform_emscripten_set_wake_lock(enable);
    return true;
+}
+#endif
+
+#ifndef __EMSCRIPTEN__
+static bool webgpu_alive(void *data)
+{
+#ifdef HAVE_WAYLAND
+   webgpu_t *wg = (webgpu_t*)data;
+   /* The compositor's events are pumped by the frame's window check */
+   if (wg && wg->wl)
+      return true;
+#endif
+   return x11_alive(data);
+}
+
+static bool webgpu_focus(void *data)
+{
+#ifdef HAVE_WAYLAND
+   webgpu_t *wg = (webgpu_t*)data;
+   if (wg && wg->wl)
+      return gfx_ctx_wl_has_focus(wg->wl);
+#endif
+   return x11_has_focus_internal(data);
+}
+
+static bool webgpu_suppress_screensaver(void *data, bool enable)
+{
+#ifdef HAVE_WAYLAND
+   webgpu_t *wg = (webgpu_t*)data;
+   if (wg && wg->wl)
+      return gfx_ctx_wl_suppress_screensaver(wg->wl, enable);
+#endif
+   return x11_suspend_screensaver(data, enable);
 }
 #endif
 
@@ -887,6 +1024,13 @@ static void webgpu_free(void *data)
    if (wg->instance)
       wgpuInstanceRelease(wg->instance);
 #ifndef __EMSCRIPTEN__
+#ifdef HAVE_WAYLAND
+   if (wg->wl)
+   {
+      gfx_ctx_wl_free_common(wg->wl, true);
+      wg->wl = NULL;
+   }
+#endif
    if (g_x11_dpy)
    {
       x11_input_ctx_destroy();
@@ -977,6 +1121,14 @@ static void webgpu_show_mouse(void *data, bool state)
 #ifdef __EMSCRIPTEN__
    platform_emscripten_set_pointer_visibility(state);
 #else
+#ifdef HAVE_WAYLAND
+   webgpu_t *wg = (webgpu_t*)data;
+   if (wg && wg->wl)
+   {
+      gfx_ctx_wl_show_mouse(wg->wl, state);
+      return;
+   }
+#endif
    x11_show_mouse(data, state);
 #endif
 }
@@ -1043,15 +1195,9 @@ video_driver_t video_webgpu = {
    webgpu_init,
    webgpu_frame,
    webgpu_set_nonblock_state,
-#ifdef __EMSCRIPTEN__
    webgpu_alive,
    webgpu_focus,
    webgpu_suppress_screensaver,
-#else
-   x11_alive,
-   x11_has_focus_internal,
-   x11_suspend_screensaver,
-#endif
    webgpu_has_windowed,
    webgpu_set_shader,
    webgpu_free,
