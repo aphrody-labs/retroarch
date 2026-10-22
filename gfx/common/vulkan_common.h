@@ -651,7 +651,7 @@ void vulkan_debug_mark_buffer(VkDevice device, VkBuffer buffer);
 bool vulkan_context_init(gfx_ctx_vulkan_data_t *vk,
       enum vulkan_wsi_type type);
 
-#ifdef HAVE_OPENXR
+#if defined(HAVE_OPENXR) || defined(HAVE_LIBRETROARCH)
 bool vulkan_context_init_headless_device(gfx_ctx_vulkan_data_t *vk);
 #endif
 #if defined(HAVE_OPENXR) && defined(ANDROID)

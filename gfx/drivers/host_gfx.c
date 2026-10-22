@@ -37,6 +37,19 @@
 #include <EGL/eglext.h>
 #endif
 
+#ifdef HAVE_VULKAN
+#define HOST_HW_VK
+#include <libretro_vulkan.h>
+#ifdef HAVE_THREADS
+#include <rthreads/rthreads.h>
+#endif
+#include "../common/vulkan_common.h"
+#endif
+
+#if defined(HOST_HW_GL) || defined(HOST_HW_VK)
+#define HOST_HW
+#endif
+
 typedef struct
 {
    uint8_t *buf;
@@ -121,10 +134,49 @@ typedef struct
 } host_gl_t;
 #endif
 
+#ifdef HOST_HW_VK
+/* Frames in flight: the one being copied and the one being read */
+#define HOST_VK_SYNC 2
+
+typedef struct
+{
+   gfx_ctx_vulkan_data_t ctx;
+   struct retro_hw_render_interface_vulkan iface;
+   VkCommandPool pool;
+   VkCommandBuffer cmd[HOST_VK_SYNC];
+   VkFence fence[HOST_VK_SYNC];
+   VkBuffer buf[HOST_VK_SYNC];
+   VkDeviceMemory mem[HOST_VK_SYNC];
+   const uint8_t *map[HOST_VK_SYNC];
+   unsigned buf_width[HOST_VK_SYNC];
+   unsigned buf_height[HOST_VK_SYNC];
+   VkFormat buf_format[HOST_VK_SYNC];
+   bool pending[HOST_VK_SYNC];
+   bool coherent;
+   unsigned index;
+   unsigned width;
+   unsigned height;
+   /* what the core handed over for this frame */
+   const struct retro_vulkan_image *image;
+   VkSemaphore *wait;
+   VkPipelineStageFlags *wait_stages;
+   unsigned num_wait;
+   unsigned cap_wait;
+   uint32_t src_queue_family;
+   VkCommandBuffer *cmds;
+   unsigned num_cmd;
+   unsigned cap_cmd;
+   VkSemaphore signal;
+} host_vk_t;
+#endif
+
 typedef struct
 {
 #ifdef HOST_HW_GL
    host_gl_t *gl;
+#endif
+#ifdef HOST_HW_VK
+   host_vk_t *vk;
 #endif
    uint64_t serial;
    host_picture_t core;
@@ -156,22 +208,74 @@ static bool host_picture_store(host_picture_t *pic, const void *frame,
    return true;
 }
 
-#ifdef HOST_HW_GL
+#ifdef HOST_HW
 bool video_host_hw_context_supported(enum retro_hw_context_type type)
 {
    switch (type)
    {
+#ifdef HOST_HW_GL
       case RETRO_HW_CONTEXT_OPENGL:
       case RETRO_HW_CONTEXT_OPENGL_CORE:
       case RETRO_HW_CONTEXT_OPENGLES2:
       case RETRO_HW_CONTEXT_OPENGLES3:
       case RETRO_HW_CONTEXT_OPENGLES_VERSION:
          return true;
+#endif
+#ifdef HOST_HW_VK
+      case RETRO_HW_CONTEXT_VULKAN:
+         return true;
+#endif
       default:
          break;
    }
    return false;
 }
+
+/* 32-bit rows into the core picture as XRGB8888, top first */
+static bool host_picture_store_rgba32(host_picture_t *pic,
+      const uint8_t *src, unsigned width, unsigned height,
+      bool flip, bool bgra)
+{
+   unsigned y;
+   unsigned pitch = width * 4;
+   size_t size    = (size_t)pitch * height;
+
+   if (size > pic->buf_cap)
+   {
+      uint8_t *tmp = (uint8_t*)realloc(pic->buf, size);
+      if (!tmp)
+         return false;
+      pic->buf     = tmp;
+      pic->buf_cap = size;
+   }
+   for (y = 0; y < height; y++)
+   {
+      const uint8_t *row = src
+         + (size_t)pitch * (flip ? height - 1 - y : y);
+      uint8_t *dst       = pic->buf + (size_t)pitch * y;
+      if (bgra)
+         memcpy(dst, row, pitch);
+      else
+      {
+         unsigned x;
+         for (x = 0; x < pitch; x += 4)
+         {
+            dst[x + 0] = row[x + 2];
+            dst[x + 1] = row[x + 1];
+            dst[x + 2] = row[x + 0];
+            dst[x + 3] = 0xff;
+         }
+      }
+   }
+   pic->width  = width;
+   pic->height = height;
+   pic->pitch  = pitch;
+   pic->format = LIBRETROARCH_PIXEL_XRGB8888;
+   return true;
+}
+#endif
+
+#ifdef HOST_HW_GL
 
 static void host_gl_free(host_gl_t *gl)
 {
@@ -384,48 +488,6 @@ error:
    return NULL;
 }
 
-/* Rows of the read picture into the core picture, top first, XRGB8888 */
-static bool host_gl_store(host_gl_t *gl, host_picture_t *pic,
-      const uint8_t *src, unsigned width, unsigned height)
-{
-   unsigned y;
-   unsigned pitch = width * 4;
-   size_t size    = (size_t)pitch * height;
-
-   if (size > pic->buf_cap)
-   {
-      uint8_t *tmp = (uint8_t*)realloc(pic->buf, size);
-      if (!tmp)
-         return false;
-      pic->buf     = tmp;
-      pic->buf_cap = size;
-   }
-   for (y = 0; y < height; y++)
-   {
-      const uint8_t *row = src
-         + (size_t)pitch * (gl->flip ? height - 1 - y : y);
-      uint8_t *dst       = pic->buf + (size_t)pitch * y;
-      if (gl->bgra)
-         memcpy(dst, row, pitch);
-      else
-      {
-         unsigned x;
-         for (x = 0; x < pitch; x += 4)
-         {
-            dst[x + 0] = row[x + 2];
-            dst[x + 1] = row[x + 1];
-            dst[x + 2] = row[x + 0];
-            dst[x + 3] = 0xff;
-         }
-      }
-   }
-   pic->width  = width;
-   pic->height = height;
-   pic->pitch  = pitch;
-   pic->format = LIBRETROARCH_PIXEL_XRGB8888;
-   return true;
-}
-
 static bool host_gl_read(host_video_t *host, unsigned width,
       unsigned height)
 {
@@ -465,8 +527,9 @@ static bool host_gl_read(host_video_t *host, unsigned width,
                      * gl->pbo_height[prev] * 4,
                      HOST_GL_MAP_READ_BIT)))
          {
-            stored = host_gl_store(gl, &host->core, src,
-                  gl->pbo_width[prev], gl->pbo_height[prev]);
+            stored = host_picture_store_rgba32(&host->core, src,
+                  gl->pbo_width[prev], gl->pbo_height[prev],
+                  gl->flip, gl->bgra);
             gl->unmap_buffer(HOST_GL_PIXEL_PACK_BUFFER);
          }
       }
@@ -484,7 +547,8 @@ static bool host_gl_read(host_video_t *host, unsigned width,
    }
    gl->read_pixels(0, 0, width, height, fmt, HOST_GL_UNSIGNED_BYTE,
          gl->rows);
-   return host_gl_store(gl, &host->core, gl->rows, width, height);
+   return host_picture_store_rgba32(&host->core, gl->rows, width, height,
+         gl->flip, gl->bgra);
 }
 
 static uintptr_t host_gl_get_current_framebuffer(void *data)
@@ -500,10 +564,436 @@ static retro_proc_address_t host_gl_get_proc_address(void *data,
 }
 #endif
 
+#ifdef HOST_HW_VK
+static void host_vk_free(host_vk_t *vk)
+{
+   unsigned i;
+   VkDevice device = vk->ctx.context.device;
+
+   if (device)
+   {
+      vkDeviceWaitIdle(device);
+      for (i = 0; i < HOST_VK_SYNC; i++)
+      {
+         if (vk->map[i])
+            vkUnmapMemory(device, vk->mem[i]);
+         if (vk->buf[i])
+            vkDestroyBuffer(device, vk->buf[i], NULL);
+         if (vk->mem[i])
+            vkFreeMemory(device, vk->mem[i], NULL);
+         if (vk->fence[i])
+            vkDestroyFence(device, vk->fence[i], NULL);
+      }
+      if (vk->pool)
+         vkDestroyCommandPool(device, vk->pool, NULL);
+   }
+   vulkan_context_destroy(&vk->ctx, false);
+   free(vk->wait);
+   free(vk->wait_stages);
+   free(vk->cmds);
+   free(vk);
+}
+
+static uint32_t host_vk_get_sync_index(void *handle)
+{
+   return ((host_vk_t*)handle)->index;
+}
+
+static uint32_t host_vk_get_sync_index_mask(void *handle)
+{
+   return (1 << HOST_VK_SYNC) - 1;
+}
+
+/* The frame before reused this index's slot; its fence was waited then. */
+static void host_vk_wait_sync_index(void *handle) { }
+
+static void host_vk_set_image(void *handle,
+      const struct retro_vulkan_image *image,
+      uint32_t num_semaphores, const VkSemaphore *semaphores,
+      uint32_t src_queue_family)
+{
+   host_vk_t *vk = (host_vk_t*)handle;
+   unsigned i;
+
+   vk->image            = image;
+   vk->src_queue_family = src_queue_family;
+   vk->num_wait         = 0;
+   if (num_semaphores > vk->cap_wait)
+   {
+      VkPipelineStageFlags *stages;
+      VkSemaphore *wait = (VkSemaphore*)realloc(vk->wait,
+            num_semaphores * sizeof(*wait));
+      if (wait)
+         vk->wait = wait;
+      stages = (VkPipelineStageFlags*)realloc(vk->wait_stages,
+            num_semaphores * sizeof(*stages));
+      if (stages)
+         vk->wait_stages = stages;
+      if (!wait || !stages)
+         return;
+      vk->cap_wait = num_semaphores;
+   }
+   for (i = 0; i < num_semaphores; i++)
+   {
+      vk->wait[i]        = semaphores[i];
+      vk->wait_stages[i] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+   }
+   vk->num_wait = num_semaphores;
+}
+
+static void host_vk_set_command_buffers(void *handle, uint32_t num_cmd,
+      const VkCommandBuffer *cmd)
+{
+   host_vk_t *vk = (host_vk_t*)handle;
+
+   vk->num_cmd = 0;
+   /* one more for the host's own copy, submitted after the core's */
+   if (num_cmd + 1 > vk->cap_cmd)
+   {
+      VkCommandBuffer *cmds = (VkCommandBuffer*)realloc(vk->cmds,
+            (num_cmd + 1) * sizeof(*cmds));
+      if (!cmds)
+         return;
+      vk->cmds    = cmds;
+      vk->cap_cmd = num_cmd + 1;
+   }
+   if (num_cmd)
+      memcpy(vk->cmds, cmd, num_cmd * sizeof(*cmd));
+   vk->num_cmd = num_cmd;
+}
+
+static void host_vk_lock_queue(void *handle)
+{
+#ifdef HAVE_THREADS
+   host_vk_t *vk = (host_vk_t*)handle;
+   if (vk->ctx.context.queue_lock)
+      slock_lock(vk->ctx.context.queue_lock);
+#endif
+}
+
+static void host_vk_unlock_queue(void *handle)
+{
+#ifdef HAVE_THREADS
+   host_vk_t *vk = (host_vk_t*)handle;
+   if (vk->ctx.context.queue_lock)
+      slock_unlock(vk->ctx.context.queue_lock);
+#endif
+}
+
+static void host_vk_set_signal_semaphore(void *handle, VkSemaphore semaphore)
+{
+   ((host_vk_t*)handle)->signal = semaphore;
+}
+
+/* A headless device the core renders with; its images are copied into
+ * host-visible buffers, one per sync index. */
+static host_vk_t *host_vk_init(unsigned width, unsigned height)
+{
+   unsigned i;
+   VkDevice device;
+   VkCommandPoolCreateInfo pool_info;
+   VkCommandBufferAllocateInfo cmd_info;
+   VkFenceCreateInfo fence_info;
+   VkBufferCreateInfo buf_info;
+   struct retro_hw_render_interface_vulkan *iface;
+   const VkPhysicalDeviceMemoryProperties *mp;
+   host_vk_t *vk = (host_vk_t*)calloc(1, sizeof(*vk));
+
+   if (!vk)
+      return NULL;
+   if (     !vulkan_context_init(&vk->ctx, VULKAN_WSI_NONE)
+         || !vulkan_context_init_headless_device(&vk->ctx))
+      goto error;
+
+   device     = vk->ctx.context.device;
+   mp         = &vk->ctx.context.memory_properties;
+   vk->width  = width;
+   vk->height = height;
+
+   memset(&pool_info, 0, sizeof(pool_info));
+   pool_info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+   pool_info.flags            =
+      VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+   pool_info.queueFamilyIndex = vk->ctx.context.graphics_queue_index;
+   if (vkCreateCommandPool(device, &pool_info, NULL, &vk->pool)
+         != VK_SUCCESS)
+      goto error;
+
+   memset(&cmd_info, 0, sizeof(cmd_info));
+   cmd_info.sType              =
+      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+   cmd_info.commandPool        = vk->pool;
+   cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+   cmd_info.commandBufferCount = HOST_VK_SYNC;
+   if (vkAllocateCommandBuffers(device, &cmd_info, vk->cmd) != VK_SUCCESS)
+      goto error;
+
+   memset(&fence_info, 0, sizeof(fence_info));
+   fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+   memset(&buf_info, 0, sizeof(buf_info));
+   buf_info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+   buf_info.size        = (VkDeviceSize)width * height * 4;
+   buf_info.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+   buf_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+   for (i = 0; i < HOST_VK_SYNC; i++)
+   {
+      VkMemoryRequirements reqs;
+      VkMemoryAllocateInfo alloc;
+      void *map = NULL;
+
+      if (     vkCreateFence(device, &fence_info, NULL, &vk->fence[i])
+            != VK_SUCCESS
+            || vkCreateBuffer(device, &buf_info, NULL, &vk->buf[i])
+            != VK_SUCCESS)
+         goto error;
+      vkGetBufferMemoryRequirements(device, vk->buf[i], &reqs);
+
+      memset(&alloc, 0, sizeof(alloc));
+      alloc.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+      alloc.allocationSize  = reqs.size;
+      /* cached memory is far faster for the CPU to read */
+      alloc.memoryTypeIndex = vulkan_find_memory_type_fallback(mp,
+            reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+      vk->coherent = (mp->memoryTypes[alloc.memoryTypeIndex].propertyFlags
+            & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? true : false;
+      if (     vkAllocateMemory(device, &alloc, NULL, &vk->mem[i])
+            != VK_SUCCESS
+            || vkBindBufferMemory(device, vk->buf[i], vk->mem[i], 0)
+            != VK_SUCCESS
+            || vkMapMemory(device, vk->mem[i], 0, VK_WHOLE_SIZE, 0, &map)
+            != VK_SUCCESS)
+         goto error;
+      vk->map[i] = (const uint8_t*)map;
+   }
+
+   iface                         = &vk->iface;
+   iface->interface_type         = RETRO_HW_RENDER_INTERFACE_VULKAN;
+   iface->interface_version      = RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION;
+   iface->handle                 = vk;
+   iface->instance               = vk->ctx.context.instance;
+   iface->gpu                    = vk->ctx.context.gpu;
+   iface->device                 = device;
+   iface->get_device_proc_addr   = vkGetDeviceProcAddr;
+   iface->get_instance_proc_addr =
+      vulkan_symbol_wrapper_instance_proc_addr();
+   iface->queue                  = vk->ctx.context.queue;
+   iface->queue_index            = vk->ctx.context.graphics_queue_index;
+   iface->set_image              = host_vk_set_image;
+   iface->get_sync_index         = host_vk_get_sync_index;
+   iface->get_sync_index_mask    = host_vk_get_sync_index_mask;
+   iface->set_command_buffers    = host_vk_set_command_buffers;
+   iface->wait_sync_index        = host_vk_wait_sync_index;
+   iface->lock_queue             = host_vk_lock_queue;
+   iface->unlock_queue           = host_vk_unlock_queue;
+   iface->set_signal_semaphore   = host_vk_set_signal_semaphore;
+
+   RARCH_LOG("[Host] Headless Vulkan device, %ux%u, async readback.\n",
+         width, height);
+   return vk;
+
+error:
+   RARCH_ERR("[Host] No headless Vulkan device.\n");
+   host_vk_free(vk);
+   return NULL;
+}
+
+static bool host_vk_format(VkFormat format, bool *bgra)
+{
+   switch (format)
+   {
+      case VK_FORMAT_B8G8R8A8_UNORM:
+      case VK_FORMAT_B8G8R8A8_SRGB:
+         *bgra = true;
+         return true;
+      case VK_FORMAT_R8G8B8A8_UNORM:
+      case VK_FORMAT_R8G8B8A8_SRGB:
+      case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+      case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+         *bgra = false;
+         return true;
+      default:
+         break;
+   }
+   return false;
+}
+
+/* Records the copy of this frame's image and publishes the one before
+ * it, whose copy has had a frame to land. */
+static void host_vk_copy(host_vk_t *vk, unsigned cur, unsigned width,
+      unsigned height)
+{
+   VkCommandBufferBeginInfo begin;
+   VkImageMemoryBarrier barrier;
+   VkBufferMemoryBarrier buf_barrier;
+   VkBufferImageCopy region;
+   VkSubmitInfo submit;
+   VkCommandBuffer cmd = vk->cmd[cur];
+   uint32_t family     = vk->ctx.context.graphics_queue_index;
+   const VkImageSubresourceRange *range =
+      &vk->image->create_info.subresourceRange;
+
+   vkResetCommandBuffer(cmd, 0);
+   memset(&begin, 0, sizeof(begin));
+   begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+   begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+   vkBeginCommandBuffer(cmd, &begin);
+
+   memset(&barrier, 0, sizeof(barrier));
+   barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+   barrier.srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+      | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+   barrier.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+   barrier.oldLayout           = vk->image->image_layout;
+   barrier.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+   barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   if (     vk->src_queue_family != VK_QUEUE_FAMILY_IGNORED
+         && vk->src_queue_family != family)
+   {
+      barrier.srcQueueFamilyIndex = vk->src_queue_family;
+      barrier.dstQueueFamilyIndex = family;
+   }
+   barrier.image                           = vk->image->create_info.image;
+   barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+   barrier.subresourceRange.baseMipLevel   = range->baseMipLevel;
+   barrier.subresourceRange.levelCount     = 1;
+   barrier.subresourceRange.baseArrayLayer = range->baseArrayLayer;
+   barrier.subresourceRange.layerCount     = 1;
+   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
+         1, &barrier);
+
+   memset(&region, 0, sizeof(region));
+   region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+   region.imageSubresource.mipLevel       = range->baseMipLevel;
+   region.imageSubresource.baseArrayLayer = range->baseArrayLayer;
+   region.imageSubresource.layerCount     = 1;
+   region.imageExtent.width               = width;
+   region.imageExtent.height              = height;
+   region.imageExtent.depth               = 1;
+   vkCmdCopyImageToBuffer(cmd, barrier.image,
+         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk->buf[cur], 1, &region);
+
+   /* back to where the core left it */
+   barrier.srcAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+   barrier.dstAccessMask       = 0;
+   barrier.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+   barrier.newLayout           = vk->image->image_layout;
+   barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+   memset(&buf_barrier, 0, sizeof(buf_barrier));
+   buf_barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+   buf_barrier.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+   buf_barrier.dstAccessMask       = VK_ACCESS_HOST_READ_BIT;
+   buf_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   buf_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   buf_barrier.buffer              = vk->buf[cur];
+   buf_barrier.size                = VK_WHOLE_SIZE;
+   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+         VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+         0, 0, NULL, 1, &buf_barrier, 1, &barrier);
+   vkEndCommandBuffer(cmd);
+
+   memset(&submit, 0, sizeof(submit));
+   submit.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+   submit.waitSemaphoreCount = vk->num_wait;
+   submit.pWaitSemaphores    = vk->wait;
+   submit.pWaitDstStageMask  = vk->wait_stages;
+   if (vk->num_cmd && vk->num_cmd < vk->cap_cmd)
+   {
+      vk->cmds[vk->num_cmd]     = cmd;
+      submit.commandBufferCount = vk->num_cmd + 1;
+      submit.pCommandBuffers    = vk->cmds;
+   }
+   else
+   {
+      submit.commandBufferCount = 1;
+      submit.pCommandBuffers    = &cmd;
+   }
+   if (vk->signal != VK_NULL_HANDLE)
+   {
+      submit.signalSemaphoreCount = 1;
+      submit.pSignalSemaphores    = &vk->signal;
+   }
+
+   host_vk_lock_queue(vk);
+   if (vkQueueSubmit(vk->ctx.context.queue, 1, &submit, vk->fence[cur])
+         == VK_SUCCESS)
+   {
+      vk->pending[cur]    = true;
+      vk->buf_width[cur]  = width;
+      vk->buf_height[cur] = height;
+      vk->buf_format[cur] = vk->image->create_info.format;
+   }
+   host_vk_unlock_queue(vk);
+}
+
+static bool host_vk_read(host_video_t *host, unsigned width,
+      unsigned height)
+{
+   bool bgra;
+   host_vk_t *vk   = host->vk;
+   VkDevice device = vk->ctx.context.device;
+   unsigned cur    = vk->index;
+   unsigned prev   = cur ^ 1;
+   bool stored     = false;
+
+   if (width > vk->width)
+      width = vk->width;
+   if (height > vk->height)
+      height = vk->height;
+
+   if (vk->image && host_vk_format(vk->image->create_info.format, &bgra))
+      host_vk_copy(vk, cur, width, height);
+   /* the core hands these over again for every frame */
+   vk->num_wait = 0;
+   vk->num_cmd  = 0;
+   vk->signal   = VK_NULL_HANDLE;
+
+   if (vk->pending[prev])
+   {
+      vkWaitForFences(device, 1, &vk->fence[prev], VK_TRUE, UINT64_MAX);
+      vkResetFences(device, 1, &vk->fence[prev]);
+      vk->pending[prev] = false;
+      if (!vk->coherent)
+      {
+         VkMappedMemoryRange mapped;
+         memset(&mapped, 0, sizeof(mapped));
+         mapped.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+         mapped.memory = vk->mem[prev];
+         mapped.size   = VK_WHOLE_SIZE;
+         vkInvalidateMappedMemoryRanges(device, 1, &mapped);
+      }
+      if (host_vk_format(vk->buf_format[prev], &bgra))
+         stored = host_picture_store_rgba32(&host->core, vk->map[prev],
+               vk->buf_width[prev], vk->buf_height[prev], false, bgra);
+   }
+   vk->index = prev;
+   return stored;
+}
+
+static bool host_vk_get_hw_render_interface(void *data,
+      const struct retro_hw_render_interface **iface)
+{
+   host_video_t *host = (host_video_t*)data;
+   if (!host->vk)
+      return false;
+   *iface = (const struct retro_hw_render_interface*)&host->vk->iface;
+   return true;
+}
+#endif
+
 static void *host_gfx_init(const video_info_t *video)
 {
    host_video_t *host = (host_video_t*)calloc(1, sizeof(*host));
-#ifdef HOST_HW_GL
+#ifdef HOST_HW
    struct retro_hw_render_callback *hwr = video_driver_get_hw_context();
 #endif
    if (!host)
@@ -511,14 +1001,23 @@ static void *host_gfx_init(const video_info_t *video)
    host->core_format = video->rgb32
       ? LIBRETROARCH_PIXEL_XRGB8888
       : LIBRETROARCH_PIXEL_RGB565;
-#ifdef HOST_HW_GL
+#ifdef HOST_HW
    if (hwr && video_host_hw_context_supported(hwr->context_type))
    {
       const struct retro_game_geometry *geom =
          &video_state_get_ptr()->av_info.geometry;
-      if (!(host->gl = host_gl_init(hwr,
-                  geom->max_width  ? geom->max_width  : geom->base_width,
-                  geom->max_height ? geom->max_height : geom->base_height)))
+      unsigned width  = geom->max_width  ? geom->max_width  : geom->base_width;
+      unsigned height = geom->max_height ? geom->max_height : geom->base_height;
+      bool ok         = false;
+#ifdef HOST_HW_VK
+      if (hwr->context_type == RETRO_HW_CONTEXT_VULKAN)
+         ok = (host->vk = host_vk_init(width, height)) != NULL;
+#endif
+#ifdef HOST_HW_GL
+      if (hwr->context_type != RETRO_HW_CONTEXT_VULKAN)
+         ok = (host->gl = host_gl_init(hwr, width, height)) != NULL;
+#endif
+      if (!ok)
       {
          free(host);
          return NULL;
@@ -556,10 +1055,19 @@ static bool host_gfx_frame(void *data, const void *frame,
    if (!frame || !width || !height)
       return true;
 
-#ifdef HOST_HW_GL
+#ifdef HOST_HW
    if (frame == RETRO_HW_FRAME_BUFFER_VALID)
    {
-      if (host->gl && host_gl_read(host, width, height))
+      bool read = false;
+#ifdef HOST_HW_GL
+      if (host->gl)
+         read = host_gl_read(host, width, height);
+#endif
+#ifdef HOST_HW_VK
+      if (host->vk)
+         read = host_vk_read(host, width, height);
+#endif
+      if (read)
       {
          host->shown = &host->core;
          host->serial++;
@@ -599,6 +1107,10 @@ static void host_gfx_free(void *data)
 #ifdef HOST_HW_GL
    if (host->gl)
       host_gl_free(host->gl);
+#endif
+#ifdef HOST_HW_VK
+   if (host->vk)
+      host_vk_free(host->vk);
 #endif
    free(host->core.buf);
    free(host->menu.buf);
@@ -654,7 +1166,11 @@ static const video_poke_interface_t host_poke_interface = {
    NULL, /* grab_mouse_toggle */
    NULL, /* get_current_shader */
    NULL, /* get_current_software_framebuffer */
+#ifdef HOST_HW_VK
+   host_vk_get_hw_render_interface,
+#else
    NULL, /* get_hw_render_interface */
+#endif
    NULL, /* set_hdr_menu_nits */
    NULL, /* set_hdr_paper_white_nits */
    NULL, /* set_hdr_expand_gamut */

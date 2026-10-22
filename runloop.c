@@ -1214,7 +1214,7 @@ static bool dynamic_verify_hw_context(
       enum retro_hw_context_type type,
       unsigned minor, unsigned major)
 {
-#if defined(HAVE_LIBRETROARCH) && defined(HAVE_EGL)
+#if defined(HAVE_LIBRETROARCH) && (defined(HAVE_EGL) || defined(HAVE_VULKAN))
    if (string_is_equal(video_ident, "host"))
       return video_host_hw_context_supported(type);
 #endif
@@ -1298,11 +1298,12 @@ static unsigned runloop_gles_version_ceiling(void)
 static bool dynamic_request_hw_context(enum retro_hw_context_type type,
       unsigned minor, unsigned major)
 {
-#if defined(HAVE_LIBRETROARCH) && defined(HAVE_EGL)
+#if defined(HAVE_LIBRETROARCH) && (defined(HAVE_EGL) || defined(HAVE_VULKAN))
    if (     string_is_equal(config_get_ptr()->arrays.video_driver, "host")
          && video_host_hw_context_supported(type))
    {
-      RARCH_LOG("[HW] Requesting OpenGL context %u.%u from the host driver.\n",
+      RARCH_LOG("[HW] Requesting %s context %u.%u from the host driver.\n",
+            type == RETRO_HW_CONTEXT_VULKAN ? "Vulkan" : "OpenGL",
             major, minor);
       return true;
    }

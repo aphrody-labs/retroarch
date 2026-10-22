@@ -1662,8 +1662,8 @@ static bool vulkan_context_init_device(gfx_ctx_vulkan_data_t *vk)
       {
          VkQueueFlags required = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
          VkBool32 supported    = VK_FALSE;
-#ifdef HAVE_OPENXR
-         /* Headless (XR): no surface, nothing to present to. */
+#if defined(HAVE_OPENXR) || defined(HAVE_LIBRETROARCH)
+         /* Headless (XR, libretroarch): no surface, nothing to present to. */
          if (vk->vk_surface == VK_NULL_HANDLE)
             supported = VK_TRUE;
          else
@@ -1955,7 +1955,7 @@ static bool vulkan_context_init_device(gfx_ctx_vulkan_data_t *vk)
    return true;
 }
 
-#ifdef HAVE_OPENXR
+#if defined(HAVE_OPENXR) || defined(HAVE_LIBRETROARCH)
 bool vulkan_context_init_headless_device(gfx_ctx_vulkan_data_t *vk)
 {
    return vulkan_context_init_device(vk);
